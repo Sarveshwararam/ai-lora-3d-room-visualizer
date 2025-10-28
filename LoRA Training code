@@ -1,0 +1,66 @@
+# APPENDIX A – LoRA TRAINING CODE
+
+import torch
+from torch import nn
+from diffusers import StableDiffusionPipeline
+from peft import LoraConfig, get_peft_model
+from datasets import load_dataset
+from torch.utils.data import DataLoader
+from torchvision import transforms
+from tqdm import tqdm
+
+# Load dataset
+dataset = load_dataset("lora/room_design_dataset", split="train")
+
+# Image preprocessing
+preprocess = transforms.Compose([
+    transforms.Resize((512, 512)),
+    transforms.ToTensor(),
+    transforms.Normalize([0.5], [0.5])
+])
+
+def collate_fn(batch):
+    images = [preprocess(item["image"]) for item in batch]
+    prompts = [item["text"] for item in batch]
+    return {"images": torch.stack(images), "prompts": prompts}
+
+dataloader = DataLoader(dataset, batch_size=4, shuffle=True, collate_fn=collate_fn)
+
+# Load Stable Diffusion base model
+base_model = StableDiffusionPipeline.from_pretrained("runwayml/stable-diffusion-v1-5", torch_dtype=torch.float16)
+base_model.to("cuda")
+
+# Configure LoRA
+lora_config = LoraConfig(
+    r=4,
+    lora_alpha=16,
+    target_modules=["to_q", "to_k", "to_v"],
+    lora_dropout=0.1,
+    bias="none"
+)
+
+# Apply LoRA
+model = get_peft_model(base_model.unet, lora_config)
+
+# Training setup
+optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
+epochs = 3
+
+for epoch in range(epochs):
+    model.train()
+    loop = tqdm(dataloader, leave=True)
+    for batch in loop:
+        optimizer.zero_grad()
+        images = batch["images"].to("cuda")
+        prompts = batch["prompts"]
+        noise = torch.randn_like(images).to("cuda")
+        loss = model(images, noise, prompts).loss
+        loss.backward()
+        optimizer.step()
+        loop.set_description(f"Epoch [{epoch+1}/{epochs}]")
+        loop.set_postfix(loss=loss.item())
+
+# Save fine-tuned weights
+model.save_pretrained("./lora_room_customizer")
+
+print("LoRA fine-tuning completed and model saved successfully!")
